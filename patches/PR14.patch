@@ -1,0 +1,47 @@
+From c41ba259720acdb28752e7158a6d6c8edc5ccffd Mon Sep 17 00:00:00 2001
+From: per1234 <accounts@perglass.com>
+Date: Sun, 15 Jul 2018 20:44:39 -0700
+Subject: [PATCH] Use correct field separator in keywords.txt
+
+The Arduino IDE requires the use of a single true tab separator between the keyword name and identifier. When spaces are used rather than a true tab the keyword is not highlighted.
+
+Reference:
+https://github.com/arduino/Arduino/wiki/Arduino-IDE-1.5:-Library-specification#keywords
+---
+ icmp_ping/keywords.txt | 20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+index 62dd5e2..6cdd21f 100644
+--- a/keywords.txt
++++ keywords.txt
+@@ -10,7 +10,7 @@ ICMPPing	KEYWORD1
+ ICMPHeader	KEYWORD1
+ ICMPEcho	KEYWORD1
+ ICMPEchoReply	KEYWORD1
+-Status          KEYWORD1
++Status	KEYWORD1
+ 
+ #######################################
+ # Methods and Functions (KEYWORD2)
+@@ -20,12 +20,12 @@ Status          KEYWORD1
+ # Constants (LITERAL1)
+ #######################################
+ 
+-SUCCESS         LITERAL1
+-SEND_TIMEOUT    LITERAL1
+-NO_RESPONSE     LITERAL1
+-BAD_RESPONSE    LITERAL1 
+-REQ_DATASIZE    LITERAL1
+-ICMP_ECHOREPLY  LITERAL1
+-ICMP_ECHOREQ    LITERAL1
+-ICMP_ECHOREP    LITERAL1
+-PING_TIMEOUT    LITERAL1
++SUCCESS	LITERAL1
++SEND_TIMEOUT	LITERAL1
++NO_RESPONSE	LITERAL1
++BAD_RESPONSE	LITERAL1
++REQ_DATASIZE	LITERAL1
++ICMP_ECHOREPLY	LITERAL1
++ICMP_ECHOREQ	LITERAL1
++ICMP_ECHOREP	LITERAL1
++PING_TIMEOUT	LITERAL1

@@ -16,6 +16,8 @@
 #define ICMPPING_DOYIELD()
 #endif
 
+#define DEFAULT_TTL			255	// issue #5
+
 
 inline uint16_t _makeUint16(const uint8_t& highOrder, const uint8_t& lowOrder)
 {
@@ -38,7 +40,13 @@ uint16_t _checksum(const ICMPEcho& echo)
 
     // add time, one half at a time.
     uint16_t const * time = (uint16_t const *)&echo.time;
+#if 0
     sum += *time + *(time + 1);
+#else
+    /* Issue #20. */
+    sum += *time;
+    sum += *(time + 1);
+#endif
     
     // add the payload
     for (uint8_t const * b = echo.payload; b < echo.payload + sizeof(echo.payload); b+=2)
@@ -173,7 +181,7 @@ Status ICMPPing::sendEchoRequest(const IPAddress& addr, const ICMPEcho& echoReq)
     // with an endianness nightmare.
     uint8_t addri [] = {addr[0], addr[1], addr[2], addr[3]};
     W5100.writeSnDIPR(_socket, addri);
-    W5100.writeSnTTL(_socket, 128);
+    W5100.writeSnTTL(_socket, DEFAULT_TTL);
     // The port isn't used, becuause ICMP is a network-layer protocol. So we
     // write zero. This probably isn't actually necessary.
     W5100.writeSnDPORT(_socket, 0);

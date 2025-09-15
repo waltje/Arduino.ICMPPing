@@ -1,0 +1,1523 @@
+From cfb1fb712d50e2609e1ba322694779b7a1a6df3f Mon Sep 17 00:00:00 2001
+From: Tim <pctim1@web.de>
+Date: Sat, 16 Apr 2016 16:33:32 +0200
+Subject: [PATCH 1/5] Also get mac address as ping-result
+
+---
+ icmp_ping/ICMPPing.cpp | 765 +++++++++++++++++++++--------------------
+ icmp_ping/ICMPPing.h   | 597 ++++++++++++++++----------------
+ 2 files changed, 683 insertions(+), 679 deletions(-)
+
+diff --git a/icmp_ping/ICMPPing.cpp b/icmp_ping/ICMPPing.cpp
+index 4539c5d..f66fee3 100644
+--- a/icmp_ping/ICMPPing.cpp
++++ b/icmp_ping/ICMPPing.cpp
+@@ -1,381 +1,384 @@
+-/*
+- * Copyright (c) 2010 by Blake Foster <blfoster@vassar.edu>
+- *
+- * This file is free software; you can redistribute it and/or modify
+- * it under the terms of either the GNU General Public License version 2
+- * or the GNU Lesser General Public License version 2.1, both as
+- * published by the Free Software Foundation.
+- */
+-
+-#include "ICMPPing.h"
+-#include <util.h>
+-
+-#ifdef ICMPPING_INSERT_YIELDS
+-#define ICMPPING_DOYIELD()		delay(2)
+-#else
+-#define ICMPPING_DOYIELD()
+-#endif
+-
+-
+-inline uint16_t _makeUint16(const uint8_t& highOrder, const uint8_t& lowOrder)
+-{
+-    // make a 16-bit unsigned integer given the low order and high order bytes.
+-    // lowOrder first because the Arduino is little endian.
+-    uint8_t value [] = {lowOrder, highOrder};
+-    return *(uint16_t *)&value;
+-}
+-
+-uint16_t _checksum(const ICMPEcho& echo)
+-{
+-    // calculate the checksum of an ICMPEcho with all fields but icmpHeader.checksum populated
+-    unsigned long sum = 0;
+-
+-    // add the header, bytes reversed since we're using little-endian arithmetic.
+-    sum += _makeUint16(echo.icmpHeader.type, echo.icmpHeader.code);
+-
+-    // add id and sequence
+-    sum += echo.id + echo.seq;
+-
+-    // add time, one half at a time.
+-    uint16_t const * time = (uint16_t const *)&echo.time;
+-    sum += *time + *(time + 1);
+-    
+-    // add the payload
+-    for (uint8_t const * b = echo.payload; b < echo.payload + sizeof(echo.payload); b+=2)
+-    {
+-        sum += _makeUint16(*b, *(b + 1));
+-    }
+-
+-    // ones complement of ones complement sum
+-    sum = (sum >> 16) + (sum & 0xffff);
+-    sum += (sum >> 16);
+-    return ~sum;
+-}
+-
+-ICMPEcho::ICMPEcho(uint8_t type, uint16_t _id, uint16_t _seq, uint8_t * _payload)
+-: seq(_seq), id(_id), time(millis())
+-{
+-    memcpy(payload, _payload, REQ_DATASIZE);
+-    icmpHeader.type = type;
+-    icmpHeader.code = 0;
+-    icmpHeader.checksum = _checksum(*this);
+-}
+-
+-ICMPEcho::ICMPEcho()
+-: seq(0), id(0), time(0)
+-{
+-    memset(payload, 0, sizeof(payload));
+-    icmpHeader.code = 0;
+-    icmpHeader.type = 0;
+-    icmpHeader.checksum = 0;
+-}
+-
+-void ICMPEcho::serialize(uint8_t * binData) const
+-{
+-    *(binData++) = icmpHeader.type;
+-    *(binData++) = icmpHeader.code;
+-
+-    *(uint16_t *)binData = htons(icmpHeader.checksum); binData += 2;
+-    *(uint16_t *)binData = htons(id);                  binData += 2;
+-    *(uint16_t *)binData = htons(seq);                 binData += 2;
+-    *(icmp_time_t *)  binData = htonl(time);                binData += 4;
+-
+-    memcpy(binData, payload, sizeof(payload));
+-}
+-
+-void ICMPEcho::deserialize(uint8_t const * binData)
+-{
+-    icmpHeader.type = *(binData++);
+-    icmpHeader.code = *(binData++);
+-
+-    icmpHeader.checksum = ntohs(*(uint16_t *)binData); binData += 2;
+-    id                  = ntohs(*(uint16_t *)binData); binData += 2;
+-    seq                 = ntohs(*(uint16_t *)binData); binData += 2;
+-
+-    if (icmpHeader.type != TIME_EXCEEDED)
+-    {
+-        time = ntohl(*(icmp_time_t *)binData);   binData += 4;
+-    }
+-
+-    memcpy(payload, binData, sizeof(payload));
+-}
+-
+-
+-uint16_t ICMPPing::ping_timeout = PING_TIMEOUT;
+-
+-ICMPPing::ICMPPing(SOCKET socket, uint8_t id) :
+-#ifdef ICMPPING_ASYNCH_ENABLE
+-  _curSeq(0), _numRetries(0), _asyncstart(0), _asyncstatus(BAD_RESPONSE),
+-#endif
+-  _id(id), _nextSeq(0), _socket(socket),  _attempt(0)
+-{
+-    memset(_payload, 0x1A, REQ_DATASIZE);
+-}
+-
+-
+-void ICMPPing::setPayload(uint8_t * payload)
+-{
+-	memcpy(_payload, payload, REQ_DATASIZE);
+-}
+-
+-void ICMPPing::openSocket()
+-{
+-
+-	W5100.execCmdSn(_socket, Sock_CLOSE);
+-    W5100.writeSnIR(_socket, 0xFF);
+-    W5100.writeSnMR(_socket, SnMR::IPRAW);
+-    W5100.writeSnPROTO(_socket, IPPROTO::ICMP);
+-    W5100.writeSnPORT(_socket, 0);
+-    W5100.execCmdSn(_socket, Sock_OPEN);
+-}
+-
+-
+-
+-void ICMPPing::operator()(const IPAddress& addr, int nRetries, ICMPEchoReply& result)
+-{
+-	openSocket();
+-
+-    ICMPEcho echoReq(ICMP_ECHOREQ, _id, _nextSeq++, _payload);
+-
+-    for (_attempt=0; _attempt<nRetries; ++_attempt)
+-    {
+-
+-    	ICMPPING_DOYIELD();
+-
+-        result.status = sendEchoRequest(addr, echoReq);
+-        if (result.status == SUCCESS)
+-        {
+-            byte replyAddr [4];
+-        	ICMPPING_DOYIELD();
+-            receiveEchoReply(echoReq, addr, result);
+-        }
+-        if (result.status == SUCCESS)
+-        {
+-            break;
+-        }
+-    }
+-   
+-    W5100.execCmdSn(_socket, Sock_CLOSE);
+-    W5100.writeSnIR(_socket, 0xFF);
+-}
+-
+-ICMPEchoReply ICMPPing::operator()(const IPAddress& addr, int nRetries)
+-{
+-    ICMPEchoReply reply;
+-    operator()(addr, nRetries, reply);
+-    return reply;
+-}
+-
+-Status ICMPPing::sendEchoRequest(const IPAddress& addr, const ICMPEcho& echoReq)
+-{
+-    // I wish there were a better way of doing this, but if we use the uint32_t
+-    // cast operator, we're forced to (1) cast away the constness, and (2) deal
+-    // with an endianness nightmare.
+-    uint8_t addri [] = {addr[0], addr[1], addr[2], addr[3]};
+-    W5100.writeSnDIPR(_socket, addri);
+-    W5100.writeSnTTL(_socket, 128);
+-    // The port isn't used, becuause ICMP is a network-layer protocol. So we
+-    // write zero. This probably isn't actually necessary.
+-    W5100.writeSnDPORT(_socket, 0);
+-
+-    uint8_t serialized [sizeof(ICMPEcho)];
+-    echoReq.serialize(serialized);
+-
+-    W5100.send_data_processing(_socket, serialized, sizeof(ICMPEcho));
+-    W5100.execCmdSn(_socket, Sock_SEND);
+-
+-    while ((W5100.readSnIR(_socket) & SnIR::SEND_OK) != SnIR::SEND_OK) 
+-    {
+-        if (W5100.readSnIR(_socket) & SnIR::TIMEOUT)
+-        {
+-            W5100.writeSnIR(_socket, (SnIR::SEND_OK | SnIR::TIMEOUT));
+-            return SEND_TIMEOUT;
+-        }
+-
+-        ICMPPING_DOYIELD();
+-    }
+-    W5100.writeSnIR(_socket, SnIR::SEND_OK);
+-    return SUCCESS;
+-}
+-
+-void ICMPPing::receiveEchoReply(const ICMPEcho& echoReq, const IPAddress& addr, ICMPEchoReply& echoReply)
+-{
+-    icmp_time_t start = millis();
+-    while (millis() - start < ping_timeout)
+-    {
+-
+-        if (W5100.getRXReceivedSize(_socket) < 1)
+-        {
+-        	// take a break, maybe let platform do
+-        	// some background work (like on ESP8266)
+-        	ICMPPING_DOYIELD();
+-        	continue;
+-        }
+-
+-        // ah! we did receive something... check it out.
+-
+-        uint8_t ipHeader[6];
+-		uint8_t buffer = W5100.readSnRX_RD(_socket);
+-		W5100.read_data(_socket, (uint16_t) buffer, ipHeader, sizeof(ipHeader));
+-		buffer += sizeof(ipHeader);
+-		for (int i = 0; i < 4; ++i)
+-			echoReply.addr[i] = ipHeader[i];
+-		uint8_t dataLen = ipHeader[4];
+-		dataLen = (dataLen << 8) + ipHeader[5];
+-
+-		uint8_t serialized[sizeof(ICMPEcho)];
+-		if (dataLen > sizeof(ICMPEcho))
+-			dataLen = sizeof(ICMPEcho);
+-		W5100.read_data(_socket, (uint16_t) buffer, serialized, dataLen);
+-		echoReply.data.deserialize(serialized);
+-
+-		buffer += dataLen;
+-		W5100.writeSnRX_RD(_socket, buffer);
+-		W5100.execCmdSn(_socket, Sock_RECV);
+-
+-		echoReply.ttl = W5100.readSnTTL(_socket);
+-
+-		// Since there aren't any ports in ICMP, we need to manually inspect the response
+-		// to see if it originated from the request we sent out.
+-		switch (echoReply.data.icmpHeader.type) {
+-		case ICMP_ECHOREP: {
+-			if (echoReply.data.id == echoReq.id
+-					&& echoReply.data.seq == echoReq.seq) {
+-				echoReply.status = SUCCESS;
+-				return;
+-			}
+-			break;
+-		}
+-		case TIME_EXCEEDED: {
+-			uint8_t * sourceIpHeader = echoReply.data.payload;
+-			unsigned int ipHeaderSize = (sourceIpHeader[0] & 0x0F) * 4u;
+-			uint8_t * sourceIcmpHeader = echoReply.data.payload + ipHeaderSize;
+-
+-			// The destination ip address in the originating packet's IP header.
+-			IPAddress sourceDestAddress(sourceIpHeader + ipHeaderSize - 4);
+-
+-			if (!(sourceDestAddress == addr))
+-				continue;
+-
+-			uint16_t sourceId = ntohs(*(uint16_t * )(sourceIcmpHeader + 4));
+-			uint16_t sourceSeq = ntohs(*(uint16_t * )(sourceIcmpHeader + 6));
+-
+-			if (sourceId == echoReq.id && sourceSeq == echoReq.seq) {
+-				echoReply.status = BAD_RESPONSE;
+-				return;
+-			}
+-			break;
+-		}
+-		}
+-
+-
+-    }
+-    echoReply.status = NO_RESPONSE;
+-}
+-
+-
+-
+-#ifdef ICMPPING_ASYNCH_ENABLE
+-/*
+- * When ICMPPING_ASYNCH_ENABLE is defined, we have access to the
+- * asyncStart()/asyncComplete() methods from the API.
+- */
+-bool ICMPPing::asyncSend(ICMPEchoReply& result)
+-{
+-    ICMPEcho echoReq(ICMP_ECHOREQ, _id, _curSeq, _payload);
+-
+-    Status sendOpResult(NO_RESPONSE);
+-    bool sendSuccess = false;
+-    for (uint8_t i=_attempt; i<_numRetries; ++i)
+-    {
+-    	_attempt++;
+-
+-    	ICMPPING_DOYIELD();
+-    	sendOpResult = sendEchoRequest(_addr, echoReq);
+-    	if (sendOpResult == SUCCESS)
+-    	{
+-    		sendSuccess = true; // it worked
+-    		sendOpResult = ASYNC_SENT; // we're doing this async-style, force the status
+-    		_asyncstart = millis(); // not the start time, for timeouts
+-    		break; // break out of this loop, 'cause we're done.
+-
+-    	}
+-    }
+-    _asyncstatus = sendOpResult; // keep track of this, in case the ICMPEchoReply isn't re-used
+-    result.status = _asyncstatus; // set the result, in case the ICMPEchoReply is checked
+-    return sendSuccess; // return success of send op
+-}
+-bool ICMPPing::asyncStart(const IPAddress& addr, int nRetries, ICMPEchoReply& result)
+-{
+-	openSocket();
+-
+-	// stash our state, so we can access
+-	// in asynchSend()/asyncComplete()
+-	_numRetries = nRetries;
+-	_attempt = 0;
+-	_curSeq = _nextSeq++;
+-	_addr = addr;
+-
+-	return asyncSend(result);
+-
+-}
+-
+-bool ICMPPing::asyncComplete(ICMPEchoReply& result)
+-{
+-
+-	if (_asyncstatus != ASYNC_SENT)
+-	{
+-		// we either:
+-		//  - didn't start an async request;
+-		//	- failed to send; or
+-		//	- are no longer waiting on this packet.
+-		// either way, we're done
+-		return true;
+-	}
+-
+-
+-	if (W5100.getRXReceivedSize(_socket))
+-	{
+-		// ooooh, we've got a pending reply
+-	    ICMPEcho echoReq(ICMP_ECHOREQ, _id, _curSeq, _payload);
+-		receiveEchoReply(echoReq, _addr, result);
+-		_asyncstatus = result.status; // make note of this status, whatever it is.
+-		return true; // whatever the result of the receiveEchoReply(), the async op is done.
+-	}
+-
+-	// nothing yet... check if we've timed out
+-	if ( (millis() - _asyncstart) > ping_timeout)
+-	{
+-
+-		// yep, we've timed out...
+-		if (_attempt < _numRetries)
+-		{
+-			// still, this wasn't our last attempt, let's try again
+-			if (asyncSend(result))
+-			{
+-				// another send has succeeded
+-				// we'll wait for that now...
+-				return false;
+-			}
+-
+-			// this send has failed. too bad,
+-			// we are done.
+-			return true;
+-		}
+-
+-		// we timed out and have no more attempts left...
+-		// hello?  is anybody out there?
+-		// guess not:
+-	    result.status = NO_RESPONSE;
+-	    return true;
+-	}
+-
+-	// have yet to time out, will wait some more:
+-	return false; // results still not in
+-
+-}
+-
+-#endif	/* ICMPPING_ASYNCH_ENABLE */
+-
+-
+-
++/*
++ * Copyright (c) 2010 by Blake Foster <blfoster@vassar.edu>
++ *
++ * This file is free software; you can redistribute it and/or modify
++ * it under the terms of either the GNU General Public License version 2
++ * or the GNU Lesser General Public License version 2.1, both as
++ * published by the Free Software Foundation.
++ */
++
++#include "ICMPPing.h"
++#include "utility/util.h"
++
++#ifdef ICMPPING_INSERT_YIELDS
++#define ICMPPING_DOYIELD()		delay(2)
++#else
++#define ICMPPING_DOYIELD()
++#endif
++
++
++inline uint16_t _makeUint16(const uint8_t& highOrder, const uint8_t& lowOrder)
++{
++    // make a 16-bit unsigned integer given the low order and high order bytes.
++    // lowOrder first because the Arduino is little endian.
++    uint8_t value [] = {lowOrder, highOrder};
++    return *(uint16_t *)&value;
++}
++
++uint16_t _checksum(const ICMPEcho& echo)
++{
++    // calculate the checksum of an ICMPEcho with all fields but icmpHeader.checksum populated
++    unsigned long sum = 0;
++
++    // add the header, bytes reversed since we're using little-endian arithmetic.
++    sum += _makeUint16(echo.icmpHeader.type, echo.icmpHeader.code);
++
++    // add id and sequence
++    sum += echo.id + echo.seq;
++
++    // add time, one half at a time.
++    uint16_t const * time = (uint16_t const *)&echo.time;
++    sum += *time + *(time + 1);
++    
++    // add the payload
++    for (uint8_t const * b = echo.payload; b < echo.payload + sizeof(echo.payload); b+=2)
++    {
++        sum += _makeUint16(*b, *(b + 1));
++    }
++
++    // ones complement of ones complement sum
++    sum = (sum >> 16) + (sum & 0xffff);
++    sum += (sum >> 16);
++    return ~sum;
++}
++
++ICMPEcho::ICMPEcho(uint8_t type, uint16_t _id, uint16_t _seq, uint8_t * _payload)
++: seq(_seq), id(_id), time(millis())
++{
++    memcpy(payload, _payload, REQ_DATASIZE);
++    icmpHeader.type = type;
++    icmpHeader.code = 0;
++    icmpHeader.checksum = _checksum(*this);
++}
++
++ICMPEcho::ICMPEcho()
++: seq(0), id(0), time(0)
++{
++    memset(payload, 0, sizeof(payload));
++    icmpHeader.code = 0;
++    icmpHeader.type = 0;
++    icmpHeader.checksum = 0;
++}
++
++void ICMPEcho::serialize(uint8_t * binData) const
++{
++    *(binData++) = icmpHeader.type;
++    *(binData++) = icmpHeader.code;
++
++    *(uint16_t *)binData = htons(icmpHeader.checksum); binData += 2;
++    *(uint16_t *)binData = htons(id);                  binData += 2;
++    *(uint16_t *)binData = htons(seq);                 binData += 2;
++    *(icmp_time_t *)  binData = htonl(time);                binData += 4;
++
++    memcpy(binData, payload, sizeof(payload));
++}
++
++void ICMPEcho::deserialize(uint8_t const * binData)
++{
++    icmpHeader.type = *(binData++);
++    icmpHeader.code = *(binData++);
++
++    icmpHeader.checksum = ntohs(*(uint16_t *)binData); binData += 2;
++    id                  = ntohs(*(uint16_t *)binData); binData += 2;
++    seq                 = ntohs(*(uint16_t *)binData); binData += 2;
++
++    if (icmpHeader.type != TIME_EXCEEDED)
++    {
++        time = ntohl(*(icmp_time_t *)binData);   binData += 4;
++    }
++
++    memcpy(payload, binData, sizeof(payload));
++}
++
++
++uint16_t ICMPPing::ping_timeout = PING_TIMEOUT;
++
++ICMPPing::ICMPPing(SOCKET socket, uint8_t id) :
++#ifdef ICMPPING_ASYNCH_ENABLE
++  _curSeq(0), _numRetries(0), _asyncstart(0), _asyncstatus(BAD_RESPONSE),
++#endif
++  _id(id), _nextSeq(0), _socket(socket),  _attempt(0)
++{
++    memset(_payload, 0x1A, REQ_DATASIZE);
++}
++
++
++void ICMPPing::setPayload(uint8_t * payload)
++{
++	memcpy(_payload, payload, REQ_DATASIZE);
++}
++
++void ICMPPing::openSocket()
++{
++
++	W5100.execCmdSn(_socket, Sock_CLOSE);
++    W5100.writeSnIR(_socket, 0xFF);
++    W5100.writeSnMR(_socket, SnMR::IPRAW);
++    W5100.writeSnPROTO(_socket, IPPROTO::ICMP);
++    W5100.writeSnPORT(_socket, 0);
++    W5100.execCmdSn(_socket, Sock_OPEN);
++}
++
++
++
++void ICMPPing::operator()(const IPAddress& addr, int nRetries, ICMPEchoReply& result)
++{
++	openSocket();
++
++    ICMPEcho echoReq(ICMP_ECHOREQ, _id, _nextSeq++, _payload);
++
++    for (_attempt=0; _attempt<nRetries; ++_attempt)
++    {
++
++    	ICMPPING_DOYIELD();
++
++        result.status = sendEchoRequest(addr, echoReq);
++        if (result.status == SUCCESS)
++        {
++            byte replyAddr [4];
++        	ICMPPING_DOYIELD();
++            receiveEchoReply(echoReq, addr, result);
++            
++            //For getting the MAC address of the pinged device
++            W5100.readSnDHAR(_socket, result.MACAddressSocket);
++        }
++        if (result.status == SUCCESS)
++        {
++            break;
++        }
++    }
++   
++    W5100.execCmdSn(_socket, Sock_CLOSE);
++    W5100.writeSnIR(_socket, 0xFF);
++}
++
++ICMPEchoReply ICMPPing::operator()(const IPAddress& addr, int nRetries)
++{
++    ICMPEchoReply reply;
++    operator()(addr, nRetries, reply);
++    return reply;
++}
++
++Status ICMPPing::sendEchoRequest(const IPAddress& addr, const ICMPEcho& echoReq)
++{
++    // I wish there were a better way of doing this, but if we use the uint32_t
++    // cast operator, we're forced to (1) cast away the constness, and (2) deal
++    // with an endianness nightmare.
++    uint8_t addri [] = {addr[0], addr[1], addr[2], addr[3]};
++    W5100.writeSnDIPR(_socket, addri);
++    W5100.writeSnTTL(_socket, 128);
++    // The port isn't used, becuause ICMP is a network-layer protocol. So we
++    // write zero. This probably isn't actually necessary.
++    W5100.writeSnDPORT(_socket, 0);
++
++    uint8_t serialized [sizeof(ICMPEcho)];
++    echoReq.serialize(serialized);
++
++    W5100.send_data_processing(_socket, serialized, sizeof(ICMPEcho));
++    W5100.execCmdSn(_socket, Sock_SEND);
++
++    while ((W5100.readSnIR(_socket) & SnIR::SEND_OK) != SnIR::SEND_OK) 
++    {
++        if (W5100.readSnIR(_socket) & SnIR::TIMEOUT)
++        {
++            W5100.writeSnIR(_socket, (SnIR::SEND_OK | SnIR::TIMEOUT));
++            return SEND_TIMEOUT;
++        }
++
++        ICMPPING_DOYIELD();
++    }
++    W5100.writeSnIR(_socket, SnIR::SEND_OK);
++    return SUCCESS;
++}
++
++void ICMPPing::receiveEchoReply(const ICMPEcho& echoReq, const IPAddress& addr, ICMPEchoReply& echoReply)
++{
++    icmp_time_t start = millis();
++    while (millis() - start < ping_timeout)
++    {
++
++        if (W5100.getRXReceivedSize(_socket) < 1)
++        {
++        	// take a break, maybe let platform do
++        	// some background work (like on ESP8266)
++        	ICMPPING_DOYIELD();
++        	continue;
++        }
++
++        // ah! we did receive something... check it out.
++
++        uint8_t ipHeader[6];
++		uint8_t buffer = W5100.readSnRX_RD(_socket);
++		W5100.read_data(_socket, (uint16_t) buffer, ipHeader, sizeof(ipHeader));
++		buffer += sizeof(ipHeader);
++		for (int i = 0; i < 4; ++i)
++			echoReply.addr[i] = ipHeader[i];
++		uint8_t dataLen = ipHeader[4];
++		dataLen = (dataLen << 8) + ipHeader[5];
++
++		uint8_t serialized[sizeof(ICMPEcho)];
++		if (dataLen > sizeof(ICMPEcho))
++			dataLen = sizeof(ICMPEcho);
++		W5100.read_data(_socket, (uint16_t) buffer, serialized, dataLen);
++		echoReply.data.deserialize(serialized);
++
++		buffer += dataLen;
++		W5100.writeSnRX_RD(_socket, buffer);
++		W5100.execCmdSn(_socket, Sock_RECV);
++
++		echoReply.ttl = W5100.readSnTTL(_socket);
++
++		// Since there aren't any ports in ICMP, we need to manually inspect the response
++		// to see if it originated from the request we sent out.
++		switch (echoReply.data.icmpHeader.type) {
++		case ICMP_ECHOREP: {
++			if (echoReply.data.id == echoReq.id
++					&& echoReply.data.seq == echoReq.seq) {
++				echoReply.status = SUCCESS;
++				return;
++			}
++			break;
++		}
++		case TIME_EXCEEDED: {
++			uint8_t * sourceIpHeader = echoReply.data.payload;
++			unsigned int ipHeaderSize = (sourceIpHeader[0] & 0x0F) * 4u;
++			uint8_t * sourceIcmpHeader = echoReply.data.payload + ipHeaderSize;
++
++			// The destination ip address in the originating packet's IP header.
++			IPAddress sourceDestAddress(sourceIpHeader + ipHeaderSize - 4);
++
++			if (!(sourceDestAddress == addr))
++				continue;
++
++			uint16_t sourceId = ntohs(*(uint16_t * )(sourceIcmpHeader + 4));
++			uint16_t sourceSeq = ntohs(*(uint16_t * )(sourceIcmpHeader + 6));
++
++			if (sourceId == echoReq.id && sourceSeq == echoReq.seq) {
++				echoReply.status = BAD_RESPONSE;
++				return;
++			}
++			break;
++		}
++		}
++
++
++    }
++    echoReply.status = NO_RESPONSE;
++}
++
++
++
++#ifdef ICMPPING_ASYNCH_ENABLE
++/*
++ * When ICMPPING_ASYNCH_ENABLE is defined, we have access to the
++ * asyncStart()/asyncComplete() methods from the API.
++ */
++bool ICMPPing::asyncSend(ICMPEchoReply& result)
++{
++    ICMPEcho echoReq(ICMP_ECHOREQ, _id, _curSeq, _payload);
++
++    Status sendOpResult(NO_RESPONSE);
++    bool sendSuccess = false;
++    for (uint8_t i=_attempt; i<_numRetries; ++i)
++    {
++    	_attempt++;
++
++    	ICMPPING_DOYIELD();
++    	sendOpResult = sendEchoRequest(_addr, echoReq);
++    	if (sendOpResult == SUCCESS)
++    	{
++    		sendSuccess = true; // it worked
++    		sendOpResult = ASYNC_SENT; // we're doing this async-style, force the status
++    		_asyncstart = millis(); // not the start time, for timeouts
++    		break; // break out of this loop, 'cause we're done.
++
++    	}
++    }
++    _asyncstatus = sendOpResult; // keep track of this, in case the ICMPEchoReply isn't re-used
++    result.status = _asyncstatus; // set the result, in case the ICMPEchoReply is checked
++    return sendSuccess; // return success of send op
++}
++bool ICMPPing::asyncStart(const IPAddress& addr, int nRetries, ICMPEchoReply& result)
++{
++	openSocket();
++
++	// stash our state, so we can access
++	// in asynchSend()/asyncComplete()
++	_numRetries = nRetries;
++	_attempt = 0;
++	_curSeq = _nextSeq++;
++	_addr = addr;
++
++	return asyncSend(result);
++
++}
++
++bool ICMPPing::asyncComplete(ICMPEchoReply& result)
++{
++
++	if (_asyncstatus != ASYNC_SENT)
++	{
++		// we either:
++		//  - didn't start an async request;
++		//	- failed to send; or
++		//	- are no longer waiting on this packet.
++		// either way, we're done
++		return true;
++	}
++
++
++	if (W5100.getRXReceivedSize(_socket))
++	{
++		// ooooh, we've got a pending reply
++	    ICMPEcho echoReq(ICMP_ECHOREQ, _id, _curSeq, _payload);
++		receiveEchoReply(echoReq, _addr, result);
++		_asyncstatus = result.status; // make note of this status, whatever it is.
++		return true; // whatever the result of the receiveEchoReply(), the async op is done.
++	}
++
++	// nothing yet... check if we've timed out
++	if ( (millis() - _asyncstart) > ping_timeout)
++	{
++
++		// yep, we've timed out...
++		if (_attempt < _numRetries)
++		{
++			// still, this wasn't our last attempt, let's try again
++			if (asyncSend(result))
++			{
++				// another send has succeeded
++				// we'll wait for that now...
++				return false;
++			}
++
++			// this send has failed. too bad,
++			// we are done.
++			return true;
++		}
++
++		// we timed out and have no more attempts left...
++		// hello?  is anybody out there?
++		// guess not:
++	    result.status = NO_RESPONSE;
++	    return true;
++	}
++
++	// have yet to time out, will wait some more:
++	return false; // results still not in
++
++}
++
++#endif	/* ICMPPING_ASYNCH_ENABLE */
++
++
++
+diff --git a/icmp_ping/ICMPPing.h b/icmp_ping/ICMPPing.h
+index 444e825..ea07410 100644
+--- a/icmp_ping/ICMPPing.h
++++ b/icmp_ping/ICMPPing.h
+@@ -1,298 +1,299 @@
+-/*
+- * Copyright (c) 2010 by Blake Foster <blfoster@vassar.edu>
+- *
+- * This file is free software; you can redistribute it and/or modify
+- * it under the terms of either the GNU General Public License version 2
+- * or the GNU Lesser General Public License version 2.1, both as
+- * published by the Free Software Foundation.
+- */
+-
+-#include <SPI.h>
+-#include <Ethernet.h>
+-#include <utility/w5100.h>
+-
+-#define REQ_DATASIZE 64
+-#define ICMP_ECHOREPLY 0
+-#define ICMP_ECHOREQ 8
+-#define ICMP_ECHOREP 0
+-#define TIME_EXCEEDED 11
+-#define PING_TIMEOUT 1000
+-
+-
+-// ICMPPING_ASYNCH_ENABLE -- define this to enable asynch operations
+-// #define ICMPPING_ASYNCH_ENABLE
+-
+-// ICMPPING_INSERT_YIELDS -- some platforms, such as ESP8266, like
+-// (read: need) to do background work so control must be yielded
+-// back to the main system periodically when you are doing something
+-// that takes a good while.
+-// Define (uncomment the following line) on these platforms, which
+-// will call a short delay() at critical junctures.
+-// #define ICMPPING_INSERT_YIELDS
+-
+-typedef unsigned long icmp_time_t;
+-
+-class ICMPHeader;
+-class ICMPPing;
+-
+-typedef enum Status
+-{
+-    /*
+-    Indicates whether a ping succeeded or failed due to one of various error
+-    conditions. These correspond to error conditions that occur in this
+-    library, not anything defined in the ICMP protocol.
+-    */
+-    SUCCESS = 0,
+-    SEND_TIMEOUT = 1, // Timed out sending the request
+-    NO_RESPONSE = 2, // Died waiting for a response
+-    BAD_RESPONSE = 3, // we got back the wrong type
+-    ASYNC_SENT = 4
+-} Status;
+-
+-
+-struct ICMPHeader
+-{
+-    /*
+-    Header for an ICMP packet. Does not include the IP header.
+-    */
+-    uint8_t type;
+-    uint8_t code;
+-    uint16_t checksum;
+-};
+-
+-
+-struct ICMPEcho
+-{
+-    /*
+-    Contents of an ICMP echo packet, including the ICMP header. Does not
+-    include the IP header.
+-    */
+-
+-    /*
+-    This constructor sets all fields and calculates the checksum. It is used
+-    to create ICMP packet data when we send a request.
+-    @param type: ICMP_ECHOREQ or ICMP_ECHOREP.
+-    @param _id: Some arbitrary id. Usually set once per process.
+-    @param _seq: The sequence number. Usually started at zero and incremented
+-    once per request.
+-    @param payload: An arbitrary chunk of data that we expect to get back in
+-    the response.
+-    */
+-    ICMPEcho(uint8_t type, uint16_t _id, uint16_t _seq, uint8_t * _payload);
+-
+-    /*
+-    This constructor leaves everything zero. This is used when we receive a
+-    response, since we nuke whatever is here already when we copy the packet
+-    data out of the W5100.
+-    */
+-    ICMPEcho();
+-
+-    ICMPHeader icmpHeader;
+-    uint16_t id;
+-    uint16_t seq;
+-    icmp_time_t time;
+-    uint8_t payload [REQ_DATASIZE];
+-
+-    /*
+-    Serialize the header as a byte array, in big endian format.
+-    */
+-    void serialize(byte * binData) const;
+-    /*
+-    Serialize the header as a byte array, in big endian format.
+-    */
+-    void deserialize(byte const * binData);
+-};
+-
+-
+-struct ICMPEchoReply
+-{
+-    /*
+-    Struct returned by ICMPPing().
+-    @param data: The packet data, including the ICMP header.
+-    @param ttl: Time to live
+-    @param status: SUCCESS if the ping succeeded. One of various error codes
+-    if it failed.
+-    @param addr: The ip address that we received the response from. Something
+-    is borked if this doesn't match the IP address we pinged.
+-    */
+-    ICMPEcho data;
+-    uint8_t ttl;
+-    Status status;
+-    IPAddress addr;
+-};
+-
+-
+-class ICMPPing
+-{
+-    /*
+-    Function-object for sending ICMP ping requests.
+-    */
+-
+-public:
+-    /*
+-    Construct an ICMP ping object.
+-    @param socket: The socket number in the W5100.
+-    @param id: The id to put in the ping packets. Can be pretty much any
+-    arbitrary number.
+-    */
+-    ICMPPing(SOCKET s, uint8_t id);
+-
+-
+-    /*
+-     Control the ping timeout (ms).  Defaults to PING_TIMEOUT (1000ms) but can
+-     be set using setTimeout(MS).
+-     @param timeout_ms: Timeout for ping replies, in milliseconds.
+-     @note: this value is static -- i.e. system-wide for all ICMPPing objects.
+-     */
+-    static void setTimeout(uint16_t setTo) { ping_timeout = setTo;}
+-
+-    /*
+-     Fetch the current setting for ping timeouts (in ms).
+-     @return: timeout for all ICMPPing requests, in milliseconds.
+-     */
+-    static uint16_t timeout() { return ping_timeout;}
+-
+-
+-    /*
+-    Pings the given IP address.
+-    @param addr: IP address to ping, as an array of four octets.
+-    @param nRetries: Number of times to rety before giving up.
+-    @return: An ICMPEchoReply containing the response. The status field in
+-    the return value indicates whether the echo request succeeded or
+-    failed. If the request failed, the status indicates the reason for
+-    failure on the last retry.
+-    */
+-    ICMPEchoReply operator()(const IPAddress&, int nRetries);
+-
+-    /*
+-    This overloaded version of the () operator takes a (hopefully blank)
+-    ICMPEchoReply as parameter instead of constructing one internally and
+-    then copying it on return. This creates a very small improvement in
+-    efficiency at the cost of making your code uglier.
+-    @param addr: IP address to ping, as an array of four octets.
+-    @param nRetries: Number of times to rety before giving up.
+-    @param result: ICMPEchoReply that will hold the result.
+-    */
+-    void operator()(const IPAddress& addr, int nRetries, ICMPEchoReply& result);
+-
+-
+-
+-    /*
+-     Use setPayload to set custom data for all ICMP packets
+-     by passing it an array of [REQ_DATASIZE].  E.g.
+-       uint8_t myPayload[REQ_DATASIZE] = { ... whatever ...};
+-       ICMPPing ping(pingSocket, (uint16_t)random(0, 255));
+-       ping.setPayload(myPayload);
+-       // ... as usual ...
+-
+-     @param payload: pointer to start of REQ_DATASIZE array of bytes to use as payload
+-
+-    */
+-    void setPayload(uint8_t * payload);
+-
+-#ifdef ICMPPING_ASYNCH_ENABLE
+-    /*
+-     Asynchronous ping methods -- only enabled if ICMPPING_ASYNCH_ENABLE is defined, above.
+-
+-     These methods are used to start a ping request, go do something else, and 
+-     come back later to check if the results are in. A complete example is in the 
+-     examples directory but the gist of it is E.g.
+-
+-
+-       // say we're in some function, to simplify things...
+-       IPAddress pingAddr(74,125,26,147); // ip address to ping
+-
+-       ICMPPing ping(0, (uint16_t)random(0, 255));
+-       ICMPEchoReply theResult;
+-
+-       if (! asyncStart(pingAddr, 3, theResult))
+-       {
+-       	   // well, this didn't start off on the right foot
+-       	   Serial.print("Echo request send failed; ");
+-       	   Serial.println((int)theResult.status);
+-
+-       	   //
+-       	   return; // forget about this
+-       }
+-
+-       // ok, ping has started...
+-       while (! ping.asyncComplete(theResult)) {
+-
+-       	   // whatever needs handling while we wait on results
+-       	   doSomeStuff();
+-       	   doSomeOtherStuff();
+-       	   delay(30);
+-
+-       }
+-
+-       // we get here means we either got a response, or timed out...
+-       if (theResult.status == SUCCESS)
+-       {
+-       	   // yay... do something.
+-       } else {
+-       	   // boooo... do something else.
+-       }
+-
+-       return;
+-
+-
+-     */ 
+-
+-
+-    /*
+-     asyncStart -- begins a new ping request, asynchronously.  Parameters are the 
+-     same as for regular ping, but the method returns false on error.
+-
+-     @param addr: IP address to ping, as an array of four octets.
+-     @param nRetries: Number of times to rety before giving up.
+-     @param result: ICMPEchoReply that will hold a status == ASYNC_SENT on success.
+-     @return: true on async request sent, false otherwise.
+-     @author: Pat Deegan, http://psychogenic.com
+-    */
+-    bool asyncStart(const IPAddress& addr, int nRetries, ICMPEchoReply& result);
+-
+-
+-    /*
+-     asyncComplete --  check if the asynchronous ping is done.
+-     This can be either because of a successful outcome (reply received)
+-     or because of an error/timeout.
+-
+-     @param result: ICMPEchoReply that will hold the result.
+-     @return: true if the result ICMPEchoReply contains the status/other data,
+-              false if we're still waiting for it to complete.
+-     @author: Pat Deegan, http://psychogenic.com
+-    */
+-    bool asyncComplete(ICMPEchoReply& result);
+-#endif
+-
+-private:
+-
+-    // holds the timeout, in ms, for all objects of this class.
+-    static uint16_t ping_timeout;
+-
+-    void openSocket();
+-
+-    Status sendEchoRequest(const IPAddress& addr, const ICMPEcho& echoReq);
+-    void receiveEchoReply(const ICMPEcho& echoReq, const IPAddress& addr, ICMPEchoReply& echoReply);
+-
+-
+-
+-#ifdef ICMPPING_ASYNCH_ENABLE
+-    // extra internal state/methods used when asynchronous pings
+-    // are enabled.
+-    bool asyncSend(ICMPEchoReply& result);
+-    uint8_t _curSeq;
+-    uint8_t _numRetries;
+-    icmp_time_t _asyncstart;
+-    Status _asyncstatus;
+-    IPAddress	_addr;
+-#endif
+-    uint8_t _id;
+-    uint8_t _nextSeq;
+-    SOCKET _socket;
+-    uint8_t _attempt;
+-
+-    uint8_t _payload[REQ_DATASIZE];
+-};
+-
+-#pragma pack(1)
++/*
++ * Copyright (c) 2010 by Blake Foster <blfoster@vassar.edu>
++ *
++ * This file is free software; you can redistribute it and/or modify
++ * it under the terms of either the GNU General Public License version 2
++ * or the GNU Lesser General Public License version 2.1, both as
++ * published by the Free Software Foundation.
++ */
++
++#include <SPI.h>
++#include <Ethernet.h>
++#include <utility/w5100.h>
++
++#define REQ_DATASIZE 64
++#define ICMP_ECHOREPLY 0
++#define ICMP_ECHOREQ 8
++#define ICMP_ECHOREP 0
++#define TIME_EXCEEDED 11
++#define PING_TIMEOUT 1000
++
++
++// ICMPPING_ASYNCH_ENABLE -- define this to enable asynch operations
++// #define ICMPPING_ASYNCH_ENABLE
++
++// ICMPPING_INSERT_YIELDS -- some platforms, such as ESP8266, like
++// (read: need) to do background work so control must be yielded
++// back to the main system periodically when you are doing something
++// that takes a good while.
++// Define (uncomment the following line) on these platforms, which
++// will call a short delay() at critical junctures.
++// #define ICMPPING_INSERT_YIELDS
++
++typedef unsigned long icmp_time_t;
++
++class ICMPHeader;
++class ICMPPing;
++
++typedef enum Status
++{
++    /*
++    Indicates whether a ping succeeded or failed due to one of various error
++    conditions. These correspond to error conditions that occur in this
++    library, not anything defined in the ICMP protocol.
++    */
++    SUCCESS = 0,
++    SEND_TIMEOUT = 1, // Timed out sending the request
++    NO_RESPONSE = 2, // Died waiting for a response
++    BAD_RESPONSE = 3, // we got back the wrong type
++    ASYNC_SENT = 4
++} Status;
++
++
++struct ICMPHeader
++{
++    /*
++    Header for an ICMP packet. Does not include the IP header.
++    */
++    uint8_t type;
++    uint8_t code;
++    uint16_t checksum;
++};
++
++
++struct ICMPEcho
++{
++    /*
++    Contents of an ICMP echo packet, including the ICMP header. Does not
++    include the IP header.
++    */
++
++    /*
++    This constructor sets all fields and calculates the checksum. It is used
++    to create ICMP packet data when we send a request.
++    @param type: ICMP_ECHOREQ or ICMP_ECHOREP.
++    @param _id: Some arbitrary id. Usually set once per process.
++    @param _seq: The sequence number. Usually started at zero and incremented
++    once per request.
++    @param payload: An arbitrary chunk of data that we expect to get back in
++    the response.
++    */
++    ICMPEcho(uint8_t type, uint16_t _id, uint16_t _seq, uint8_t * _payload);
++
++    /*
++    This constructor leaves everything zero. This is used when we receive a
++    response, since we nuke whatever is here already when we copy the packet
++    data out of the W5100.
++    */
++    ICMPEcho();
++
++    ICMPHeader icmpHeader;
++    uint16_t id;
++    uint16_t seq;
++    icmp_time_t time;
++    uint8_t payload [REQ_DATASIZE];
++
++    /*
++    Serialize the header as a byte array, in big endian format.
++    */
++    void serialize(byte * binData) const;
++    /*
++    Serialize the header as a byte array, in big endian format.
++    */
++    void deserialize(byte const * binData);
++};
++
++
++struct ICMPEchoReply
++{
++    /*
++    Struct returned by ICMPPing().
++    @param data: The packet data, including the ICMP header.
++    @param ttl: Time to live
++    @param status: SUCCESS if the ping succeeded. One of various error codes
++    if it failed.
++    @param addr: The ip address that we received the response from. Something
++    is borked if this doesn't match the IP address we pinged.
++    */
++    ICMPEcho data;
++    uint8_t ttl;
++    Status status;
++    IPAddress addr;
++    uint8_t MACAddressSocket[6];
++};
++
++
++class ICMPPing
++{
++    /*
++    Function-object for sending ICMP ping requests.
++    */
++
++public:
++    /*
++    Construct an ICMP ping object.
++    @param socket: The socket number in the W5100.
++    @param id: The id to put in the ping packets. Can be pretty much any
++    arbitrary number.
++    */
++    ICMPPing(SOCKET s, uint8_t id);
++
++
++    /*
++     Control the ping timeout (ms).  Defaults to PING_TIMEOUT (1000ms) but can
++     be set using setTimeout(MS).
++     @param timeout_ms: Timeout for ping replies, in milliseconds.
++     @note: this value is static -- i.e. system-wide for all ICMPPing objects.
++     */
++    static void setTimeout(uint16_t setTo) { ping_timeout = setTo;}
++
++    /*
++     Fetch the current setting for ping timeouts (in ms).
++     @return: timeout for all ICMPPing requests, in milliseconds.
++     */
++    static uint16_t timeout() { return ping_timeout;}
++
++
++    /*
++    Pings the given IP address.
++    @param addr: IP address to ping, as an array of four octets.
++    @param nRetries: Number of times to rety before giving up.
++    @return: An ICMPEchoReply containing the response. The status field in
++    the return value indicates whether the echo request succeeded or
++    failed. If the request failed, the status indicates the reason for
++    failure on the last retry.
++    */
++    ICMPEchoReply operator()(const IPAddress&, int nRetries);
++
++    /*
++    This overloaded version of the () operator takes a (hopefully blank)
++    ICMPEchoReply as parameter instead of constructing one internally and
++    then copying it on return. This creates a very small improvement in
++    efficiency at the cost of making your code uglier.
++    @param addr: IP address to ping, as an array of four octets.
++    @param nRetries: Number of times to rety before giving up.
++    @param result: ICMPEchoReply that will hold the result.
++    */
++    void operator()(const IPAddress& addr, int nRetries, ICMPEchoReply& result);
++
++
++
++    /*
++     Use setPayload to set custom data for all ICMP packets
++     by passing it an array of [REQ_DATASIZE].  E.g.
++       uint8_t myPayload[REQ_DATASIZE] = { ... whatever ...};
++       ICMPPing ping(pingSocket, (uint16_t)random(0, 255));
++       ping.setPayload(myPayload);
++       // ... as usual ...
++
++     @param payload: pointer to start of REQ_DATASIZE array of bytes to use as payload
++
++    */
++    void setPayload(uint8_t * payload);
++
++#ifdef ICMPPING_ASYNCH_ENABLE
++    /*
++     Asynchronous ping methods -- only enabled if ICMPPING_ASYNCH_ENABLE is defined, above.
++
++     These methods are used to start a ping request, go do something else, and 
++     come back later to check if the results are in. A complete example is in the 
++     examples directory but the gist of it is E.g.
++
++
++       // say we're in some function, to simplify things...
++       IPAddress pingAddr(74,125,26,147); // ip address to ping
++
++       ICMPPing ping(0, (uint16_t)random(0, 255));
++       ICMPEchoReply theResult;
++
++       if (! asyncStart(pingAddr, 3, theResult))
++       {
++       	   // well, this didn't start off on the right foot
++       	   Serial.print("Echo request send failed; ");
++       	   Serial.println((int)theResult.status);
++
++       	   //
++       	   return; // forget about this
++       }
++
++       // ok, ping has started...
++       while (! ping.asyncComplete(theResult)) {
++
++       	   // whatever needs handling while we wait on results
++       	   doSomeStuff();
++       	   doSomeOtherStuff();
++       	   delay(30);
++
++       }
++
++       // we get here means we either got a response, or timed out...
++       if (theResult.status == SUCCESS)
++       {
++       	   // yay... do something.
++       } else {
++       	   // boooo... do something else.
++       }
++
++       return;
++
++
++     */ 
++
++
++    /*
++     asyncStart -- begins a new ping request, asynchronously.  Parameters are the 
++     same as for regular ping, but the method returns false on error.
++
++     @param addr: IP address to ping, as an array of four octets.
++     @param nRetries: Number of times to rety before giving up.
++     @param result: ICMPEchoReply that will hold a status == ASYNC_SENT on success.
++     @return: true on async request sent, false otherwise.
++     @author: Pat Deegan, http://psychogenic.com
++    */
++    bool asyncStart(const IPAddress& addr, int nRetries, ICMPEchoReply& result);
++
++
++    /*
++     asyncComplete --  check if the asynchronous ping is done.
++     This can be either because of a successful outcome (reply received)
++     or because of an error/timeout.
++
++     @param result: ICMPEchoReply that will hold the result.
++     @return: true if the result ICMPEchoReply contains the status/other data,
++              false if we're still waiting for it to complete.
++     @author: Pat Deegan, http://psychogenic.com
++    */
++    bool asyncComplete(ICMPEchoReply& result);
++#endif
++
++private:
++
++    // holds the timeout, in ms, for all objects of this class.
++    static uint16_t ping_timeout;
++
++    void openSocket();
++
++    Status sendEchoRequest(const IPAddress& addr, const ICMPEcho& echoReq);
++    void receiveEchoReply(const ICMPEcho& echoReq, const IPAddress& addr, ICMPEchoReply& echoReply);
++
++
++
++#ifdef ICMPPING_ASYNCH_ENABLE
++    // extra internal state/methods used when asynchronous pings
++    // are enabled.
++    bool asyncSend(ICMPEchoReply& result);
++    uint8_t _curSeq;
++    uint8_t _numRetries;
++    icmp_time_t _asyncstart;
++    Status _asyncstatus;
++    IPAddress	_addr;
++#endif
++    uint8_t _id;
++    uint8_t _nextSeq;
++    SOCKET _socket;
++    uint8_t _attempt;
++
++    uint8_t _payload[REQ_DATASIZE];
++};
++
++#pragma pack(1)
+
+From 067607f4eaa55b1b4fa827ba5bb5e4a3affd1e16 Mon Sep 17 00:00:00 2001
+From: Tim <pctim1@web.de>
+Date: Sat, 16 Apr 2016 16:36:57 +0200
+Subject: [PATCH 2/5] Also serial print of device mac address
+
+---
+ icmp_ping/examples/Ping/Ping.ino | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/icmp_ping/examples/Ping/Ping.ino b/icmp_ping/examples/Ping/Ping.ino
+index 0a9879b..eb64be1 100644
+--- a/icmp_ping/examples/Ping/Ping.ino
++++ b/icmp_ping/examples/Ping/Ping.ino
+@@ -14,7 +14,7 @@
+ 
+ #include <SPI.h>         
+ #include <Ethernet.h>
+-#include <ICMPPing.h>
++#include "ICMPPing.h"
+ 
+ byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED}; // max address for ethernet shield
+ byte ip[] = {192,168,2,177}; // ip address for ethernet shield
+@@ -38,7 +38,7 @@ void loop()
+   if (echoReply.status == SUCCESS)
+   {
+     sprintf(buffer,
+-            "Reply[%d] from: %d.%d.%d.%d: bytes=%d time=%ldms TTL=%d",
++            "Reply[%d] from: %d.%d.%d.%d: bytes=%d time=%ldms TTL=%d  MAC=%02X:%02X:%02X:%02X:%02X:%02X",
+             echoReply.data.seq,
+             echoReply.addr[0],
+             echoReply.addr[1],
+@@ -46,8 +46,14 @@ void loop()
+             echoReply.addr[3],
+             REQ_DATASIZE,
+             millis() - echoReply.data.time,
+-            echoReply.ttl);
+-  }
++            echoReply.ttl,
++            echoReply.MACAddressSocket[0],
++            echoReply.MACAddressSocket[1],
++            echoReply.MACAddressSocket[2],
++            echoReply.MACAddressSocket[3],
++            echoReply.MACAddressSocket[4],
++            echoReply.MACAddressSocket[5]);
++  }    
+   else
+   {
+     sprintf(buffer, "Echo request failed; %d", echoReply.status);
+
+From cb13986f5485d5664301cef501e9df87c496c90a Mon Sep 17 00:00:00 2001
+From: Tim <pctim1@web.de>
+Date: Sat, 16 Apr 2016 16:37:26 +0200
+Subject: [PATCH 3/5] Added files via upload
+
+---
+ contributors.txt | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/contributors.txt b/contributors.txt
+index 3333fde..a0ac074 100644
+--- a/contributors.txt
++++ b/contributors.txt
+@@ -1,2 +1,3 @@
+ Blake Foster
+ Pat Deegan
++PcTim
+\ No newline at end of file
+
+From f57a8255ba4080696f98ce959c973135d18a9eec Mon Sep 17 00:00:00 2001
+From: Tim <pctim1@web.de>
+Date: Sat, 16 Apr 2016 22:51:55 +0200
+Subject: [PATCH 4/5] Add mac address functionality also to async ping
+
+---
+ icmp_ping/ICMPPing.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/icmp_ping/ICMPPing.cpp b/icmp_ping/ICMPPing.cpp
+index f66fee3..dff0dc6 100644
+--- a/icmp_ping/ICMPPing.cpp
++++ b/icmp_ping/ICMPPing.cpp
+@@ -148,9 +148,6 @@ void ICMPPing::operator()(const IPAddress& addr, int nRetries, ICMPEchoReply& re
+             byte replyAddr [4];
+         	ICMPPING_DOYIELD();
+             receiveEchoReply(echoReq, addr, result);
+-            
+-            //For getting the MAC address of the pinged device
+-            W5100.readSnDHAR(_socket, result.MACAddressSocket);
+         }
+         if (result.status == SUCCESS)
+         {
+@@ -237,6 +234,9 @@ void ICMPPing::receiveEchoReply(const ICMPEcho& echoReq, const IPAddress& addr,
+ 		W5100.execCmdSn(_socket, Sock_RECV);
+ 
+ 		echoReply.ttl = W5100.readSnTTL(_socket);
++		
++		//For getting the MAC address of the pinged device
++		W5100.readSnDHAR(_socket, echoReply.MACAddressSocket);
+ 
+ 		// Since there aren't any ports in ICMP, we need to manually inspect the response
+ 		// to see if it originated from the request we sent out.
+
+From bf4db93d0b5df7003a2bd873bef8ff5a8d30379d Mon Sep 17 00:00:00 2001
+From: Tim <pctim1@web.de>
+Date: Sat, 16 Apr 2016 22:54:39 +0200
+Subject: [PATCH 5/5] Also print mac address of the async pinged device
+
+---
+ icmp_ping/examples/PingAsync/PingAsync.ino | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/icmp_ping/examples/PingAsync/PingAsync.ino b/icmp_ping/examples/PingAsync/PingAsync.ino
+index 6f5795c..3ddd9ae 100644
+--- a/icmp_ping/examples/PingAsync/PingAsync.ino
++++ b/icmp_ping/examples/PingAsync/PingAsync.ino
+@@ -173,7 +173,7 @@ void loop()
+     // huzzah
+     lastPingSucceeded = true;
+     sprintf(buffer,
+-            "Reply[%d] from: %d.%d.%d.%d: bytes=%d time=%ldms TTL=%d",
++            "Reply[%d] from: %d.%d.%d.%d: bytes=%d time=%ldms TTL=%d  MAC=%02X:%02X:%02X:%02X:%02X:%02X",
+             echoResult.data.seq,
+             echoResult.addr[0],
+             echoResult.addr[1],
+@@ -181,7 +181,13 @@ void loop()
+             echoResult.addr[3],
+             REQ_DATASIZE,
+             millis() - echoResult.data.time,
+-            echoResult.ttl);
++            echoResult.ttl,
++            echoResult.MACAddressSocket[0],
++            echoResult.MACAddressSocket[1],
++            echoResult.MACAddressSocket[2],
++            echoResult.MACAddressSocket[3],
++            echoResult.MACAddressSocket[4],
++            echoResult.MACAddressSocket[5]);
+   }
+ 
+   Serial.println(buffer);
+
